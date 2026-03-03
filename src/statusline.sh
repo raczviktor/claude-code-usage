@@ -16,25 +16,48 @@ CTX_USED=$(echo "$INPUT" | jq -r '.context_window.used_percentage // 0' 2>/dev/n
 IN_TOK=$(echo "$INPUT" | jq -r '.context_window.total_input_tokens // 0' 2>/dev/null)
 OUT_TOK=$(echo "$INPUT" | jq -r '.context_window.total_output_tokens // 0' 2>/dev/null)
 
-# --- Delta calculation (tokens used since last request) ---
-PREV_IN=0 PREV_OUT=0
+# --- Turn-based token tracking ---
+# Detects idle→active transitions to mark turn boundaries.
+# "turn:" shows cumulative tokens since the current turn started.
+PREV_IN=0 PREV_OUT=0 WAS_IDLE=0
+TURN_START_IN=0 TURN_START_OUT=0
 if [ -f "$STATE_FILE" ]; then
   source "$STATE_FILE" 2>/dev/null
   PREV_IN=${PREV_IN_TOK:-0}
   PREV_OUT=${PREV_OUT_TOK:-0}
+  WAS_IDLE=${WAS_IDLE:-0}
+  TURN_START_IN=${TURN_START_IN:-0}
+  TURN_START_OUT=${TURN_START_OUT:-0}
 fi
 
-DELTA_IN=$(( IN_TOK - PREV_IN ))
-DELTA_OUT=$(( OUT_TOK - PREV_OUT ))
-DELTA_TOTAL=$(( DELTA_IN + DELTA_OUT ))
+TICK_DELTA=$(( (IN_TOK - PREV_IN) + (OUT_TOK - PREV_OUT) ))
 
-# Negative delta = new session (reset)
-[ "$DELTA_IN" -lt 0 ] 2>/dev/null && DELTA_IN=$IN_TOK DELTA_OUT=$OUT_TOK DELTA_TOTAL=$((IN_TOK + OUT_TOK))
+# Negative delta = new session (reset all tracking)
+if [ "$TICK_DELTA" -lt 0 ] 2>/dev/null; then
+  TURN_START_IN=$IN_TOK
+  TURN_START_OUT=$OUT_TOK
+  WAS_IDLE=0
+elif [ "$TICK_DELTA" -eq 0 ] 2>/dev/null; then
+  # No change since last refresh → idle
+  WAS_IDLE=1
+elif [ "$WAS_IDLE" -eq 1 ] 2>/dev/null; then
+  # Was idle, now tokens changed → new turn started
+  TURN_START_IN=$PREV_IN
+  TURN_START_OUT=$PREV_OUT
+  WAS_IDLE=0
+fi
+
+TURN_IN=$(( IN_TOK - TURN_START_IN ))
+TURN_OUT=$(( OUT_TOK - TURN_START_OUT ))
+TURN_TOTAL=$(( TURN_IN + TURN_OUT ))
 
 # Save state
 cat > "$STATE_FILE" <<STATE
 PREV_IN_TOK=$IN_TOK
 PREV_OUT_TOK=$OUT_TOK
+WAS_IDLE=$WAS_IDLE
+TURN_START_IN=$TURN_START_IN
+TURN_START_OUT=$TURN_START_OUT
 STATE
 
 # --- Token formatting (1234 → 1.2k, 12345 → 12k, 1234567 → 1.2M) ---
@@ -110,8 +133,8 @@ s_icon() {
 PCT_5H=$(u2p "$UTIL_5H")
 PCT_7D=$(u2p "$UTIL_7D")
 
-# Line 1: model + context window + last request tokens
-echo -e "${MODEL}  $(ctx_color $CTX_USED)$(ctx_bar $CTX_USED) ${CTX_USED}%%${NC}  ${DIM}last:${NC} $(fmt_tok $DELTA_IN)→$(fmt_tok $DELTA_OUT) ${DIM}($(fmt_tok $DELTA_TOTAL))${NC}"
+# Line 1: model + context window + turn token consumption
+echo -e "${MODEL}  $(ctx_color $CTX_USED)$(ctx_bar $CTX_USED) ${CTX_USED}%%${NC}  ${DIM}turn:${NC} $(fmt_tok $TURN_IN)→$(fmt_tok $TURN_OUT) ${DIM}($(fmt_tok $TURN_TOTAL))${NC}"
 
 # Line 2: rate limits + total tokens
 echo -e "$(s_icon $STATUS) 5h:$(u_color $UTIL_5H)${PCT_5H}%%${NC}  7d:$(u_color $UTIL_7D)${PCT_7D}%%${NC}  ${DIM}all: $(fmt_tok $IN_TOK)→$(fmt_tok $OUT_TOK)${NC}"

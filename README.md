@@ -5,11 +5,11 @@ Real-time rate limit and token usage monitor for the [Claude Code](https://docs.
 ## What it looks like
 
 ```
-Claude 4 Opus  ▓▓▓▓▓░░░░░ 42%  last: 3.2k→1.8k (5.0k)
+Claude 4 Opus  ▓▓▓▓▓░░░░░ 42%  turn: 3.2k→1.8k (5.0k)
 ✅ 5h:23%  7d:11%  all: 45.2k→28.1k
 ```
 
-**Line 1:** Active model, context window usage (colored bar), and tokens used in the last request (input→output)
+**Line 1:** Active model, context window usage (colored bar), and tokens consumed in the current turn since your last interaction (input→output)
 
 **Line 2:** Rate limit status (✅ allowed / ⚠️ throttled / ❌ rejected), 5-hour and 7-day utilization percentages, and total session tokens
 
