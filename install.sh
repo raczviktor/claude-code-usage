@@ -1,12 +1,12 @@
 #!/bin/bash
 # install.sh – Installer for claude-code-usage
 # Usage:
-#   Install:   curl -sL https://raw.githubusercontent.com/rviktor87/claude-code-usage/main/install.sh | bash
-#   Uninstall: curl -sL https://raw.githubusercontent.com/rviktor87/claude-code-usage/main/install.sh | bash -s -- --uninstall
+#   Install:   curl -sL https://raw.githubusercontent.com/raczviktor/claude-code-usage/main/install.sh | bash
+#   Uninstall: curl -sL https://raw.githubusercontent.com/raczviktor/claude-code-usage/main/install.sh | bash -s -- --uninstall
 
 set -e
 
-REPO_RAW="https://raw.githubusercontent.com/rviktor87/claude-code-usage/main"
+REPO_RAW="https://raw.githubusercontent.com/raczviktor/claude-code-usage/main"
 INSTALL_DIR="$HOME/.local/bin"
 SETTINGS_FILE="$HOME/.claude/settings.json"
 

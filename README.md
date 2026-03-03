@@ -16,7 +16,7 @@ Claude 4 Opus  ▓▓▓▓▓░░░░░ 42%  last: 3.2k→1.8k (5.0k)
 ## Quick Install
 
 ```bash
-curl -sL https://raw.githubusercontent.com/rviktor87/claude-code-usage/main/install.sh | bash
+curl -sL https://raw.githubusercontent.com/raczviktor/claude-code-usage/main/install.sh | bash
 ```
 
 Then restart Claude Code.
@@ -27,8 +27,8 @@ Then restart Claude Code.
 
 ```bash
 mkdir -p ~/.local/bin
-curl -sL https://raw.githubusercontent.com/rviktor87/claude-code-usage/main/src/usage.sh -o ~/.local/bin/usage.sh
-curl -sL https://raw.githubusercontent.com/rviktor87/claude-code-usage/main/src/statusline.sh -o ~/.local/bin/statusline.sh
+curl -sL https://raw.githubusercontent.com/raczviktor/claude-code-usage/main/src/usage.sh -o ~/.local/bin/usage.sh
+curl -sL https://raw.githubusercontent.com/raczviktor/claude-code-usage/main/src/statusline.sh -o ~/.local/bin/statusline.sh
 chmod +x ~/.local/bin/usage.sh ~/.local/bin/statusline.sh
 ```
 
@@ -152,7 +152,7 @@ Your terminal may not support ANSI colors. Claude Code's built-in terminal shoul
 ## Uninstall
 
 ```bash
-curl -sL https://raw.githubusercontent.com/rviktor87/claude-code-usage/main/install.sh | bash -s -- --uninstall
+curl -sL https://raw.githubusercontent.com/raczviktor/claude-code-usage/main/install.sh | bash -s -- --uninstall
 ```
 
 Or manually:
