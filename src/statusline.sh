@@ -132,6 +132,20 @@ fi
 NC="\033[0m"
 DIM="\033[2m"
 
+# Remaining time until reset (seconds → "1h23m" / "2d5h")
+fmt_remaining() {
+  local reset=$1
+  if [ -z "$reset" ] || [ "$reset" = "0" ]; then echo "?"; return; fi
+  local now=$(date +%s)
+  local diff=$(( reset - now ))
+  if [ "$diff" -le 0 ] 2>/dev/null; then echo "now"; return; fi
+  local d=$(( diff / 86400 )) h=$(( (diff % 86400) / 3600 )) m=$(( (diff % 3600) / 60 ))
+  if [ "$d" -gt 0 ]; then echo "${d}d${h}h"
+  elif [ "$h" -gt 0 ]; then echo "${h}h${m}m"
+  else echo "${m}m"
+  fi
+}
+
 u2p() {
   if [ "$1" = "?" ] || [ "$1" = "..." ] || [ -z "$1" ]; then echo "$1"
   else awk "BEGIN {printf \"%.0f\", $1 * 100}" 2>/dev/null || echo "?"
@@ -155,6 +169,8 @@ s_icon() {
 
 PCT_5H=$(u2p "$UTIL_5H")
 PCT_7D=$(u2p "$UTIL_7D")
+REM_5H=$(fmt_remaining "${RESET_5H:-0}")
+REM_7D=$(fmt_remaining "${RESET_7D:-0}")
 
 # Line 1: model + context + last result cost + turn total
 LAST_FMT=""
@@ -164,4 +180,4 @@ fi
 echo -e "${MODEL}  $(ctx_color $CTX_USED)$(ctx_bar $CTX_USED) ${CTX_USED}%%${NC}  ${LAST_FMT}${DIM}turn:${NC} $(fmt_tok $TURN_TOTAL)"
 
 # Line 2: rate limits + total tokens
-echo -e "$(s_icon $STATUS) 5h:$(u_color $UTIL_5H)${PCT_5H}%%${NC}  7d:$(u_color $UTIL_7D)${PCT_7D}%%${NC}  ${DIM}all: $(fmt_tok $IN_TOK)→$(fmt_tok $OUT_TOK)${NC}"
+echo -e "$(s_icon $STATUS) 5h:$(u_color $UTIL_5H)${PCT_5H}%%${NC}${DIM}(${REM_5H})${NC}  7d:$(u_color $UTIL_7D)${PCT_7D}%%${NC}${DIM}(${REM_7D})${NC}  ${DIM}all: $(fmt_tok $IN_TOK)→$(fmt_tok $OUT_TOK)${NC}"
