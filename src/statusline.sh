@@ -16,15 +16,13 @@ CTX_USED=$(echo "$INPUT" | jq -r '.context_window.used_percentage // 0' 2>/dev/n
 IN_TOK=$(echo "$INPUT" | jq -r '.context_window.total_input_tokens // 0' 2>/dev/null)
 OUT_TOK=$(echo "$INPUT" | jq -r '.context_window.total_output_tokens // 0' 2>/dev/null)
 
-# --- Turn & sub-turn token tracking ---
-# Turn  = user interaction boundary (idle→active = new turn)
-# Sub-turn = individual result boundary (active→idle within a turn)
-# "last:" shows the cost of the most recent completed result
-# "turn:" shows cumulative tokens since the current turn started
+# --- Turn tracking ---
+# Turn = full user interaction (question → all iterations → done)
+# New turn starts after long idle (6s+), meaning user sent a new message
+# LAST_TURN = cost of the previous completed turn
 PREV_IN=0 PREV_OUT=0 IDLE_TICKS=0
 TURN_START_IN=0 TURN_START_OUT=0
-SUB_START_IN=0 SUB_START_OUT=0
-LAST_RESULT=0
+LAST_TURN=0
 NEW_TURN_THRESHOLD=3  # ticks idle before new turn (3 × 2s = 6s)
 if [ -f "$STATE_FILE" ]; then
   source "$STATE_FILE" 2>/dev/null
@@ -33,9 +31,7 @@ if [ -f "$STATE_FILE" ]; then
   IDLE_TICKS=${IDLE_TICKS:-0}
   TURN_START_IN=${TURN_START_IN:-0}
   TURN_START_OUT=${TURN_START_OUT:-0}
-  SUB_START_IN=${SUB_START_IN:-0}
-  SUB_START_OUT=${SUB_START_OUT:-0}
-  LAST_RESULT=${LAST_RESULT:-0}
+  LAST_TURN=${LAST_TURN:-0}
 fi
 
 TICK_DELTA=$(( (IN_TOK - PREV_IN) + (OUT_TOK - PREV_OUT) ))
@@ -44,32 +40,22 @@ TICK_DELTA=$(( (IN_TOK - PREV_IN) + (OUT_TOK - PREV_OUT) ))
 if [ "$TICK_DELTA" -lt 0 ] 2>/dev/null; then
   TURN_START_IN=$IN_TOK
   TURN_START_OUT=$OUT_TOK
-  SUB_START_IN=$IN_TOK
-  SUB_START_OUT=$OUT_TOK
-  LAST_RESULT=0
+  LAST_TURN=0
   IDLE_TICKS=0
 elif [ "$TICK_DELTA" -eq 0 ] 2>/dev/null; then
-  if [ "$IDLE_TICKS" -eq 0 ] 2>/dev/null; then
-    # Just became idle → snapshot the sub-turn cost
-    LAST_RESULT=$(( (PREV_IN - SUB_START_IN) + (PREV_OUT - SUB_START_OUT) ))
-  fi
   IDLE_TICKS=$(( IDLE_TICKS + 1 ))
 elif [ "$IDLE_TICKS" -gt 0 ] 2>/dev/null; then
-  # Was idle, now active
+  # Was idle, now active again
   if [ "$IDLE_TICKS" -ge "$NEW_TURN_THRESHOLD" ] 2>/dev/null; then
-    # Long idle → new user turn
+    # Long idle → new turn. Save previous turn cost.
+    LAST_TURN=$(( (PREV_IN - TURN_START_IN) + (PREV_OUT - TURN_START_OUT) ))
     TURN_START_IN=$PREV_IN
     TURN_START_OUT=$PREV_OUT
   fi
-  # Always start a new sub-turn
-  SUB_START_IN=$PREV_IN
-  SUB_START_OUT=$PREV_OUT
   IDLE_TICKS=0
 fi
 
-TURN_IN=$(( IN_TOK - TURN_START_IN ))
-TURN_OUT=$(( OUT_TOK - TURN_START_OUT ))
-TURN_TOTAL=$(( TURN_IN + TURN_OUT ))
+TURN_TOTAL=$(( (IN_TOK - TURN_START_IN) + (OUT_TOK - TURN_START_OUT) ))
 
 # Save state
 cat > "$STATE_FILE" <<STATE
@@ -78,9 +64,7 @@ PREV_OUT_TOK=$OUT_TOK
 IDLE_TICKS=$IDLE_TICKS
 TURN_START_IN=$TURN_START_IN
 TURN_START_OUT=$TURN_START_OUT
-SUB_START_IN=$SUB_START_IN
-SUB_START_OUT=$SUB_START_OUT
-LAST_RESULT=$LAST_RESULT
+LAST_TURN=$LAST_TURN
 STATE
 
 # --- Token formatting (1234 → 1.2k, 12345 → 12k, 1234567 → 1.2M) ---
@@ -146,38 +130,63 @@ fmt_remaining() {
   fi
 }
 
+# Pace: actual_usage / expected_usage (time-proportional)
+# < 1.0 = under budget (good), > 1.0 = over budget (bad)
+calc_pace() {
+  local util=$1 reset=$2 window=$3
+  if [ -z "$util" ] || [ "$util" = "?" ] || [ "$util" = "..." ] || [ -z "$reset" ] || [ "$reset" = "0" ]; then echo "?"; return; fi
+  local now=$(date +%s)
+  local remaining=$(( reset - now ))
+  [ "$remaining" -le 0 ] && remaining=0
+  local elapsed=$(( window - remaining ))
+  [ "$elapsed" -le 0 ] && { echo "?"; return; }
+  awk "BEGIN {
+    expected = $elapsed / $window
+    if (expected < 0.01) { printf \"?\"; exit }
+    printf \"%.1f\", $util / expected
+  }" 2>/dev/null || echo "?"
+}
+
+pace_color() {
+  local pace=$1
+  if [ "$pace" = "?" ]; then echo -n ""; return; fi
+  local lvl=$(awk "BEGIN { if ($pace < 1.0) print 0; else if ($pace < 1.3) print 1; else print 2 }" 2>/dev/null)
+  case "$lvl" in
+    0) echo -n "\033[32m";;
+    1) echo -n "\033[33m";;
+    2) echo -n "\033[31m";;
+  esac
+}
+
+pace_icon() {
+  local pace=$1
+  if [ "$pace" = "?" ]; then echo -n ""; return; fi
+  local lvl=$(awk "BEGIN { if ($pace < 0.8) print 0; else if ($pace < 1.0) print 1; else if ($pace < 1.3) print 2; else print 3 }" 2>/dev/null)
+  case "$lvl" in
+    0) echo -n "\033[32m▼${NC}";;
+    1) echo -n "\033[32m✓${NC}";;
+    2) echo -n "\033[33m▲${NC}";;
+    3) echo -n "\033[31m▲${NC}";;
+  esac
+}
+
 u2p() {
   if [ "$1" = "?" ] || [ "$1" = "..." ] || [ -z "$1" ]; then echo "$1"
   else awk "BEGIN {printf \"%.0f\", $1 * 100}" 2>/dev/null || echo "?"
   fi
 }
 
-u_color() {
-  local pct=$(u2p "$1")
-  if [ "$pct" = "?" ] || [ "$pct" = "..." ]; then echo -n ""
-  elif [ "$pct" -lt 50 ] 2>/dev/null; then echo -n "\033[32m"
-  elif [ "$pct" -lt 80 ] 2>/dev/null; then echo -n "\033[33m"
-  else echo -n "\033[31m"
-  fi
-}
-
-s_icon() {
-  case "$1" in
-    allowed) echo -n "✅";; throttled) echo -n "⚠️";; rejected) echo -n "❌";; *) echo -n "·";;
-  esac
-}
-
 PCT_5H=$(u2p "$UTIL_5H")
 PCT_7D=$(u2p "$UTIL_7D")
 REM_5H=$(fmt_remaining "${RESET_5H:-0}")
 REM_7D=$(fmt_remaining "${RESET_7D:-0}")
+PACE_5H=$(calc_pace "$UTIL_5H" "${RESET_5H:-0}" 18000)
+PACE_7D=$(calc_pace "$UTIL_7D" "${RESET_7D:-0}" 604800)
 
-# Line 1: model + context + last result cost + turn total
+SEP="${DIM}│${NC}"
+
 LAST_FMT=""
-if [ "$LAST_RESULT" -gt 0 ] 2>/dev/null; then
-  LAST_FMT="${DIM}last:${NC} +$(fmt_tok $LAST_RESULT)  "
+if [ "$TURN_TOTAL" -gt 0 ] 2>/dev/null; then
+  LAST_FMT="  ${SEP}  💬 $(fmt_tok $TURN_TOTAL)"
 fi
-echo -e "${MODEL}  $(ctx_color $CTX_USED)$(ctx_bar $CTX_USED) ${CTX_USED}%%${NC}  ${LAST_FMT}${DIM}turn:${NC} $(fmt_tok $TURN_TOTAL)"
-
-# Line 2: rate limits + total tokens
-echo -e "$(s_icon $STATUS) 5h:$(u_color $UTIL_5H)${PCT_5H}%%${NC}${DIM}(${REM_5H})${NC}  7d:$(u_color $UTIL_7D)${PCT_7D}%%${NC}${DIM}(${REM_7D})${NC}  ${DIM}all: $(fmt_tok $IN_TOK)→$(fmt_tok $OUT_TOK)${NC}"
+echo -e "🤖 ${MODEL}  🧠 $(ctx_color $CTX_USED)$(ctx_bar $CTX_USED) ${CTX_USED}%${NC}  ${SEP}  🔋 $(pace_color $PACE_5H)${PCT_5H}%${NC}$(pace_icon $PACE_5H) ${DIM}${REM_5H}${NC} · $(pace_color $PACE_7D)${PCT_7D}%${NC}$(pace_icon $PACE_7D) ${DIM}${REM_7D}${NC}${LAST_FMT}"
