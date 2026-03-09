@@ -5,13 +5,17 @@ Real-time rate limit and token usage monitor for the [Claude Code](https://docs.
 ## What it looks like
 
 ```
-Claude 4 Opus  ▓▓▓▓▓░░░░░ 42%  turn: 3.2k→1.8k (5.0k)
-✅ 5h:23%  7d:11%  all: 45.2k→28.1k
+🤖 Opus 4.6  🧠 ▓▓▓▓▓░░░░░ 52%  │  🔋 61%✓ 1h10m · 4%▼ 6d21h  │  💬 45.6k
 ```
 
-**Line 1:** Active model, context window usage (colored bar), and tokens consumed in the current turn since your last interaction (input→output)
-
-**Line 2:** Rate limit status (✅ allowed / ⚠️ throttled / ❌ rejected), 5-hour and 7-day utilization percentages, and total session tokens
+- 🤖 Active model
+- 🧠 Context window usage (colored progress bar)
+- 🔋 Rate limits with pace indicators and time until reset
+  - First value: 5-hour window (usage%, pace icon, time remaining)
+  - Second value: 7-day window (same format)
+  - Pace icons: ▼ under budget · ✓ on track · ▲ over budget
+  - Colors based on pace, not raw %: 84% with 2min left = green ✓
+- 💬 Token cost of the current interaction (question → all iterations → done)
 
 ## Quick Install
 
@@ -81,10 +85,12 @@ chmod +x ~/.local/bin/usage.sh ~/.local/bin/statusline.sh
 ```
 
 1. **`usage.sh`** makes a minimal API call (1-token Haiku request) and reads the `anthropic-ratelimit-*` response headers
-2. It writes the parsed rate limit data to a cache file (`~/.local/bin/.usage_cache`)
+2. It writes the parsed rate limit data (utilization, reset timestamps) to a cache file (`~/.local/bin/.usage_cache`)
 3. **`statusline.sh`** is called by Claude Code every 2 seconds with session JSON on stdin
 4. It reads session data (model, context, tokens) and combines it with cached rate limits
-5. If the cache is older than 5 minutes, it spawns a background `usage.sh` to refresh it
+5. It calculates **pace** (time-proportional usage rate) to color-code limits: green if sustainable, red if burning too fast
+6. It tracks **turn cost**: total tokens from your question through all iterations until done
+7. If the cache is older than 5 minutes, it spawns a background `usage.sh` to refresh it
 
 ## Customization
 
