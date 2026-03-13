@@ -1,12 +1,13 @@
 #!/bin/bash
 # statusline.sh – Claude Code status bar script
 # Reads session JSON from stdin (model, context, cost, tokens)
-# Reads rate limit cache from .usage_cache (written by usage.sh)
+# Reads rate limit cache from .usage_cache (written by rate-proxy.js or usage.sh)
 # Tracks token deltas in .statusline_state
 
 CACHE_FILE="$HOME/.local/bin/.usage_cache"
 STATE_FILE="$HOME/.local/bin/.statusline_state"
-CACHE_MAX_AGE=300  # 5 minutes
+CACHE_MAX_AGE=300       # 5 minutes – trigger background refresh
+CACHE_STALE_AGE=1800    # 30 minutes – data unreliable, show warning
 
 # --- Read session data from stdin ---
 INPUT=$(cat)
@@ -101,16 +102,30 @@ ctx_color() {
 
 # --- Read rate limit cache ---
 UTIL_5H="?" UTIL_7D="?" STATUS="?"
+RATE_ERROR=""
 if [ -f "$CACHE_FILE" ]; then
   source "$CACHE_FILE" 2>/dev/null
   NOW=$(date +%s)
   CACHE_AGE=$(( NOW - ${TIMESTAMP:-0} ))
-  if [ "$CACHE_AGE" -gt "$CACHE_MAX_AGE" ]; then
+  # Auth error or other failure in cache
+  if [ "$STATUS" = "auth_error" ] || [ "$STATUS" = "no_headers" ]; then
+    RATE_ERROR="TOKEN"
+    UTIL_5H="" UTIL_7D=""
+    if [ "$CACHE_AGE" -gt "$CACHE_MAX_AGE" ]; then
+      ("$HOME/.local/bin/usage.sh" > /dev/null 2>&1 &)
+    fi
+  elif [ "$CACHE_AGE" -gt "$CACHE_STALE_AGE" ]; then
+    # Cache too old – unreliable, try to refresh
+    RATE_ERROR="STALE"
+    UTIL_5H="" UTIL_7D=""
+    ("$HOME/.local/bin/usage.sh" > /dev/null 2>&1 &)
+  elif [ "$CACHE_AGE" -gt "$CACHE_MAX_AGE" ]; then
     ("$HOME/.local/bin/usage.sh" > /dev/null 2>&1 &)
   fi
 else
   ("$HOME/.local/bin/usage.sh" > /dev/null 2>&1 &)
-  UTIL_5H="..." UTIL_7D="..."
+  UTIL_5H="" UTIL_7D=""
+  RATE_ERROR="..."
 fi
 
 NC="\033[0m"
@@ -176,17 +191,30 @@ u2p() {
   fi
 }
 
-PCT_5H=$(u2p "$UTIL_5H")
-PCT_7D=$(u2p "$UTIL_7D")
-REM_5H=$(fmt_remaining "${RESET_5H:-0}")
-REM_7D=$(fmt_remaining "${RESET_7D:-0}")
-PACE_5H=$(calc_pace "$UTIL_5H" "${RESET_5H:-0}" 18000)
-PACE_7D=$(calc_pace "$UTIL_7D" "${RESET_7D:-0}" 604800)
-
 SEP="${DIM}│${NC}"
 
 LAST_FMT=""
 if [ "$TURN_TOTAL" -gt 0 ] 2>/dev/null; then
   LAST_FMT="  ${SEP}  💬 $(fmt_tok $TURN_TOTAL)"
 fi
-echo -e "🤖 ${MODEL}  🧠 $(ctx_color $CTX_USED)$(ctx_bar $CTX_USED) ${CTX_USED}%${NC}  ${SEP}  🔋 $(pace_color $PACE_5H)${PCT_5H}%${NC}$(pace_icon $PACE_5H) ${DIM}${REM_5H}${NC} · $(pace_color $PACE_7D)${PCT_7D}%${NC}$(pace_icon $PACE_7D) ${DIM}${REM_7D}${NC}${LAST_FMT}"
+
+# Rate limit section: warning on error, normal display otherwise
+if [ -n "$RATE_ERROR" ]; then
+  if [ "$RATE_ERROR" = "TOKEN" ]; then
+    RATE_FMT="  ${SEP}  \033[33m⚠ token expired – run usage.sh\033[0m"
+  elif [ "$RATE_ERROR" = "STALE" ]; then
+    RATE_FMT="  ${SEP}  \033[33m⚠ rate limit stale\033[0m"
+  else
+    RATE_FMT="  ${SEP}  🔋 ..."
+  fi
+else
+  PCT_5H=$(u2p "$UTIL_5H")
+  PCT_7D=$(u2p "$UTIL_7D")
+  REM_5H=$(fmt_remaining "${RESET_5H:-0}")
+  REM_7D=$(fmt_remaining "${RESET_7D:-0}")
+  PACE_5H=$(calc_pace "$UTIL_5H" "${RESET_5H:-0}" 18000)
+  PACE_7D=$(calc_pace "$UTIL_7D" "${RESET_7D:-0}" 604800)
+  RATE_FMT="  ${SEP}  🔋 $(pace_color $PACE_5H)${PCT_5H}%${NC}$(pace_icon $PACE_5H) ${DIM}${REM_5H}${NC} · $(pace_color $PACE_7D)${PCT_7D}%${NC}$(pace_icon $PACE_7D) ${DIM}${REM_7D}${NC}"
+fi
+
+echo -e "🤖 ${MODEL}  🧠 $(ctx_color $CTX_USED)$(ctx_bar $CTX_USED) ${CTX_USED}%${NC}${RATE_FMT}${LAST_FMT}"

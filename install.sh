@@ -28,7 +28,7 @@ if [ "$1" = "--uninstall" ]; then
   echo ""
 
   # Remove scripts
-  for f in usage.sh statusline.sh; do
+  for f in usage.sh statusline.sh rate-proxy.js; do
     if [ -f "$INSTALL_DIR/$f" ]; then
       rm "$INSTALL_DIR/$f"
       info "Removed $INSTALL_DIR/$f"
@@ -43,13 +43,23 @@ if [ "$1" = "--uninstall" ]; then
     fi
   done
 
-  # Remove statusLine from settings.json
+  # Remove statusLine and ANTHROPIC_BASE_URL from settings.json
   if [ -f "$SETTINGS_FILE" ] && command -v jq &>/dev/null; then
+    TMP=$(mktemp)
+    CHANGED=false
+
+    # Remove statusLine from all project entries
     if jq -e '.projects // empty | to_entries[] | select(.value.statusLine)' "$SETTINGS_FILE" &>/dev/null; then
-      # Remove statusLine from all project entries
-      TMP=$(mktemp)
       jq '(.projects // {}) |= with_entries(del(.value.statusLine))' "$SETTINGS_FILE" > "$TMP" && mv "$TMP" "$SETTINGS_FILE"
+      CHANGED=true
       info "Removed statusLine config from $SETTINGS_FILE"
+    fi
+
+    # Remove ANTHROPIC_BASE_URL from env
+    if jq -e '.env.ANTHROPIC_BASE_URL' "$SETTINGS_FILE" &>/dev/null; then
+      TMP=$(mktemp)
+      jq 'del(.env.ANTHROPIC_BASE_URL)' "$SETTINGS_FILE" > "$TMP" && mv "$TMP" "$SETTINGS_FILE"
+      info "Removed ANTHROPIC_BASE_URL from $SETTINGS_FILE"
     fi
   fi
 
@@ -86,14 +96,25 @@ fi
 
 info "Prerequisites OK (jq, curl, awk)"
 
+# Check for Node.js (needed for rate-proxy)
+HAS_NODE=false
+if command -v node &>/dev/null; then
+  HAS_NODE=true
+  info "Node.js found ($(node --version))"
+else
+  warn "Node.js not found – rate-proxy.js won't work (polling fallback will be used)"
+fi
+
 # --- Create install directory ---
 mkdir -p "$INSTALL_DIR"
 info "Directory ready: $INSTALL_DIR"
 
 # --- Download scripts ---
-for script in usage.sh statusline.sh; do
+for script in usage.sh statusline.sh rate-proxy.js; do
   curl -sL "$REPO_RAW/src/$script" -o "$INSTALL_DIR/$script"
-  chmod +x "$INSTALL_DIR/$script"
+  if [ "$script" != "rate-proxy.js" ]; then
+    chmod +x "$INSTALL_DIR/$script"
+  fi
   info "Installed $INSTALL_DIR/$script"
 done
 
@@ -103,7 +124,7 @@ STATUSLINE_CMD="$INSTALL_DIR/statusline.sh"
 
 # Build the statusLine config snippet
 STATUSLINE_JSON=$(cat <<'SLJSON'
-{"command":"~/.local/bin/statusline.sh","refresh":"2s","enabled":true}
+{"type":"command","command":"~/.local/bin/statusline.sh"}
 SLJSON
 )
 
@@ -114,54 +135,50 @@ configure_settings() {
   if [ ! -f "$SETTINGS_FILE" ]; then
     # No settings file – create one
     mkdir -p "$(dirname "$SETTINGS_FILE")"
-    cat > "$SETTINGS_FILE" <<SETTINGS
+    if [ "$HAS_NODE" = true ]; then
+      cat > "$SETTINGS_FILE" <<SETTINGS
 {
-  "projects": {
-    "$PROJECT_KEY": {
-      "statusLine": $STATUSLINE_JSON
-    }
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8087"
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "bash ~/.local/bin/statusline.sh"
   }
 }
 SETTINGS
+    else
+      cat > "$SETTINGS_FILE" <<SETTINGS
+{
+  "statusLine": {
+    "type": "command",
+    "command": "bash ~/.local/bin/statusline.sh"
+  }
+}
+SETTINGS
+    fi
     info "Created $SETTINGS_FILE with statusLine config"
 
-  elif ! jq -e '.projects' "$SETTINGS_FILE" &>/dev/null; then
-    # Settings exists but no projects key
-    TMP=$(mktemp)
-    jq --argjson sl "$STATUSLINE_JSON" --arg pk "$PROJECT_KEY" \
-      '. + {projects: {($pk): {statusLine: $sl}}}' "$SETTINGS_FILE" > "$TMP" && mv "$TMP" "$SETTINGS_FILE"
-    info "Added statusLine config to $SETTINGS_FILE"
-
-  elif ! jq -e --arg pk "$PROJECT_KEY" '.projects[$pk].statusLine' "$SETTINGS_FILE" &>/dev/null; then
-    # Projects exists but no statusLine for this key
-    TMP=$(mktemp)
-    jq --argjson sl "$STATUSLINE_JSON" --arg pk "$PROJECT_KEY" \
-      '.projects[$pk] = ((.projects[$pk] // {}) + {statusLine: $sl})' "$SETTINGS_FILE" > "$TMP" && mv "$TMP" "$SETTINGS_FILE"
-    info "Added statusLine config to $SETTINGS_FILE"
-
   else
-    # statusLine already exists
-    EXISTING=$(jq -r --arg pk "$PROJECT_KEY" '.projects[$pk].statusLine.command // ""' "$SETTINGS_FILE")
-    if [ "$EXISTING" = "$STATUSLINE_CMD" ] || [ "$EXISTING" = "~/.local/bin/statusline.sh" ]; then
-      info "statusLine already configured (no changes needed)"
+    # Settings exists – merge in our config
+    TMP=$(mktemp)
+
+    # Add statusLine at top level if not present
+    if ! jq -e '.statusLine' "$SETTINGS_FILE" &>/dev/null; then
+      jq --argjson sl "$STATUSLINE_JSON" '. + {statusLine: $sl}' "$SETTINGS_FILE" > "$TMP" && mv "$TMP" "$SETTINGS_FILE"
+      info "Added statusLine config to $SETTINGS_FILE"
     else
-      warn "statusLine already configured with a different command:"
-      echo "      current: $EXISTING"
-      echo "      new:     $STATUSLINE_CMD"
-      echo ""
-      if [ -t 0 ]; then
-        read -rp "  Overwrite? [y/N] " ans
-        if [[ "$ans" =~ ^[Yy] ]]; then
-          TMP=$(mktemp)
-          jq --argjson sl "$STATUSLINE_JSON" --arg pk "$PROJECT_KEY" \
-            '.projects[$pk].statusLine = $sl' "$SETTINGS_FILE" > "$TMP" && mv "$TMP" "$SETTINGS_FILE"
-          info "Updated statusLine config"
-        else
-          warn "Kept existing statusLine config"
-        fi
+      info "statusLine already configured (no changes needed)"
+    fi
+
+    # Add ANTHROPIC_BASE_URL if node is available and not already set
+    if [ "$HAS_NODE" = true ]; then
+      if ! jq -e '.env.ANTHROPIC_BASE_URL' "$SETTINGS_FILE" &>/dev/null; then
+        TMP=$(mktemp)
+        jq '.env = ((.env // {}) + {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8087"})' "$SETTINGS_FILE" > "$TMP" && mv "$TMP" "$SETTINGS_FILE"
+        info "Added ANTHROPIC_BASE_URL to $SETTINGS_FILE (proxy mode)"
       else
-        warn "Non-interactive mode – keeping existing statusLine config"
-        warn "To update manually, edit $SETTINGS_FILE"
+        info "ANTHROPIC_BASE_URL already set"
       fi
     fi
   fi
@@ -171,13 +188,25 @@ configure_settings
 
 # --- Pre-populate cache ---
 echo ""
-echo -e "${BOLD}Running initial usage check...${NC}"
-if "$INSTALL_DIR/usage.sh"; then
-  info "Cache populated"
+if [ "$HAS_NODE" = true ]; then
+  echo -e "${BOLD}Rate proxy mode enabled.${NC}"
+  echo ""
+  echo "  Start the proxy before launching Claude Code:"
+  echo "    node ~/.local/bin/rate-proxy.js &"
+  echo ""
+  echo "  The proxy intercepts Claude Code's API calls and extracts"
+  echo "  rate limit data – no extra API calls, always up-to-date."
+  echo ""
+  echo "  Tip: Add the proxy to your system startup script."
 else
-  warn "Initial usage check failed (this is OK – it will retry automatically)"
-  warn "Make sure you have a valid token in ~/.claude/.credentials.json"
-  warn "or set the ANTHROPIC_API_KEY environment variable"
+  echo -e "${BOLD}Running initial usage check (polling mode)...${NC}"
+  if "$INSTALL_DIR/usage.sh"; then
+    info "Cache populated"
+  else
+    warn "Initial usage check failed (this is OK – it will retry automatically)"
+    warn "Make sure you have a valid token in ~/.claude/.credentials.json"
+    warn "or set the ANTHROPIC_API_KEY environment variable"
+  fi
 fi
 
 # --- Done ---
@@ -185,5 +214,7 @@ echo ""
 echo -e "${BOLD}${GREEN}Installation complete!${NC}"
 echo ""
 echo "  Restart Claude Code to see the status bar."
-echo "  Run 'usage.sh' anytime to check your rate limits."
+if [ "$HAS_NODE" = true ]; then
+  echo "  Don't forget to start the proxy: node ~/.local/bin/rate-proxy.js &"
+fi
 echo ""

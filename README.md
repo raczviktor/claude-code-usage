@@ -23,7 +23,74 @@ Real-time rate limit and token usage monitor for the [Claude Code](https://docs.
 curl -sL https://raw.githubusercontent.com/raczviktor/claude-code-usage/main/install.sh | bash
 ```
 
-Then restart Claude Code.
+Then start the proxy and restart Claude Code:
+
+```bash
+node ~/.local/bin/rate-proxy.js &
+```
+
+## How It Works
+
+### Proxy mode (recommended)
+
+A lightweight Node.js reverse proxy sits between Claude Code and the Anthropic API. It forwards all requests transparently and extracts the `anthropic-ratelimit-*` headers from every response.
+
+```
+┌──────────┐  http   ┌──────────────┐  https  ┌──────────────┐
+│  Claude   │───────►│  rate-proxy   │────────►│  Anthropic   │
+│  Code     │◄───────│   :8087       │◄────────│  API         │
+└──────────┘        └──────┬───────┘        └──────────────┘
+                           │ write
+                           ▼
+┌──────────┐  read  ┌──────────────┐
+│statusline│◄───────│ .usage_cache │
+│   .sh    │        └──────────────┘
+└────┬─────┘
+     │ stdout
+     ▼
+┌──────────┐
+│  Claude  │
+│  Code    │
+│  status  │
+│  bar     │
+└──────────┘
+```
+
+**How it works:**
+
+1. `ANTHROPIC_BASE_URL=http://127.0.0.1:8087` in Claude Code settings redirects all API calls through the local proxy
+2. **`rate-proxy.js`** forwards requests to `api.anthropic.com` transparently – Claude Code doesn't know it's there
+3. On every response, it extracts rate limit headers and writes them to `.usage_cache`
+4. **`statusline.sh`** reads the cache every 2 seconds, combines it with session data (model, context, tokens), and outputs the status bar
+
+**Advantages:**
+
+- **Zero extra API calls** – piggybacks on Claude Code's own traffic
+- **Always up-to-date** – cache refreshes on every API call, not every 5 minutes
+- **No auth issues** – uses Claude Code's own authentication
+- **Negligible overhead** – simple TCP proxy, adds <1ms latency
+
+### Polling mode (legacy fallback)
+
+If Node.js is not available or the proxy is not running, `statusline.sh` falls back to the original polling approach:
+
+1. **`usage.sh`** makes a minimal API call (1-token Haiku request) to read rate limit headers
+2. It writes the parsed data to `.usage_cache`
+3. **`statusline.sh`** triggers a background `usage.sh` when the cache is older than 5 minutes
+
+This mode requires a valid authentication token and costs ~1 token per check.
+
+### Why the proxy replaced polling
+
+The original design used `usage.sh` to make standalone API calls and read the rate limit headers from the response. This worked well initially, but had several problems:
+
+1. **OAuth tokens are short-lived (~8h)** – Claude Max users authenticate via OAuth. The token in `~/.claude/.credentials.json` expires and there's no public API to refresh it. When it expires, `usage.sh` gets 401 errors and the status bar shows stale data.
+
+2. **Anthropic disabled OAuth on the public API** – As of early 2025, sending an OAuth token (`sk-ant-oat01-*`) to `api.anthropic.com` returns "OAuth authentication is currently not supported." This completely broke the standalone polling approach for Claude Max users.
+
+3. **Extra API calls are wasteful** – Even when it worked, polling meant making a separate Haiku API call every 5 minutes just to read headers. With the proxy, the same data comes for free from Claude Code's own traffic.
+
+The proxy approach solves all three issues: it uses Claude Code's own authenticated connection, so it works regardless of token type, never makes extra API calls, and the data is always fresh.
 
 ## Manual Install
 
@@ -31,70 +98,104 @@ Then restart Claude Code.
 
 ```bash
 mkdir -p ~/.local/bin
-curl -sL https://raw.githubusercontent.com/raczviktor/claude-code-usage/main/src/usage.sh -o ~/.local/bin/usage.sh
+curl -sL https://raw.githubusercontent.com/raczviktor/claude-code-usage/main/src/rate-proxy.js -o ~/.local/bin/rate-proxy.js
 curl -sL https://raw.githubusercontent.com/raczviktor/claude-code-usage/main/src/statusline.sh -o ~/.local/bin/statusline.sh
-chmod +x ~/.local/bin/usage.sh ~/.local/bin/statusline.sh
+curl -sL https://raw.githubusercontent.com/raczviktor/claude-code-usage/main/src/usage.sh -o ~/.local/bin/usage.sh
+chmod +x ~/.local/bin/statusline.sh ~/.local/bin/usage.sh
 ```
 
 2. Add to your Claude Code settings (`~/.claude/settings.json`):
 
 ```json
 {
-  "projects": {
-    "*": {
-      "statusLine": {
-        "command": "~/.local/bin/statusline.sh",
-        "refresh": "2s",
-        "enabled": true
-      }
-    }
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8087"
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "bash ~/.local/bin/statusline.sh"
   }
 }
 ```
 
-3. Pre-populate the cache:
+3. Start the proxy and restart Claude Code:
 
 ```bash
-~/.local/bin/usage.sh
+node ~/.local/bin/rate-proxy.js &
 ```
 
-4. Restart Claude Code.
+## Starting the proxy automatically
 
-## How It Works
+The proxy must be running before Claude Code starts. Here are some options:
 
-```
-                     ┌──────────────┐
-                     │  Anthropic   │
-                     │  Messages    │
-                     │  API         │
-                     └──────┬───────┘
-                            │ rate limit headers
-                            ▼
-┌──────────┐ cache  ┌──────────────┐
-│statusline│◄───────│   usage.sh   │
-│   .sh    │  file  │  (checker)   │
-└────┬─────┘        └──────────────┘
-     │ stdout              ▲
-     ▼                     │ background refresh
-┌──────────┐               │ every 5 min
-│  Claude  │───────────────┘
-│  Code    │
-│ status   │
-│  bar     │
-└──────────┘
+### Linux (systemd user service)
+
+```bash
+cat > ~/.config/systemd/user/rate-proxy.service <<EOF
+[Unit]
+Description=Claude Code rate limit proxy
+
+[Service]
+ExecStart=/usr/bin/node %h/.local/bin/rate-proxy.js
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user enable --now rate-proxy
 ```
 
-1. **`usage.sh`** makes a minimal API call (1-token Haiku request) and reads the `anthropic-ratelimit-*` response headers
-2. It writes the parsed rate limit data (utilization, reset timestamps) to a cache file (`~/.local/bin/.usage_cache`)
-3. **`statusline.sh`** is called by Claude Code every 2 seconds with session JSON on stdin
-4. It reads session data (model, context, tokens) and combines it with cached rate limits
-5. It calculates **pace** (time-proportional usage rate) to color-code limits: green if sustainable, red if burning too fast
-6. It tracks **turn cost**: total tokens from your question through all iterations until done
-7. If the cache is older than 5 minutes, it spawns a background `usage.sh` to refresh it
+### macOS (launchd)
+
+```bash
+cat > ~/Library/LaunchAgents/com.claude.rate-proxy.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.claude.rate-proxy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/node</string>
+        <string>${HOME}/.local/bin/rate-proxy.js</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+</dict>
+</plist>
+EOF
+
+launchctl load ~/Library/LaunchAgents/com.claude.rate-proxy.plist
+```
+
+### Windows (startup batch script)
+
+Add to your startup script (e.g., `start_env.bat`):
+
+```batch
+start /B "" node "%USERPROFILE%\.local\bin\rate-proxy.js"
+```
+
+Or create a shortcut in `shell:startup` pointing to:
+
+```
+node.exe C:\Users\<you>\.local\bin\rate-proxy.js
+```
 
 ## Customization
 
-### Cache refresh interval
+### Proxy port
+
+Set the `RATE_PROXY_PORT` environment variable (default: `8087`):
+
+```bash
+RATE_PROXY_PORT=9090 node ~/.local/bin/rate-proxy.js &
+```
+
+Remember to update `ANTHROPIC_BASE_URL` in settings.json to match.
+
+### Cache refresh interval (polling mode)
 
 Edit `CACHE_MAX_AGE` in `statusline.sh` (default: `300` = 5 minutes):
 
@@ -112,44 +213,39 @@ Edit `refresh` in your `settings.json`:
 
 ### Progress bar width
 
-Edit the `width` variable in `usage.sh` (default: `20`):
+Edit the `width` variable in `ctx_bar()` in `statusline.sh` (default: `10`):
 
 ```bash
-local width=30  # wider bar
-```
-
-### Model for API probe
-
-Edit the model in the `curl` call in `usage.sh`. Haiku is the cheapest option:
-
-```bash
--d '{"model":"claude-haiku-4-5-20251001", ...}'
+local pct=$1 width=15  # wider bar
 ```
 
 ## Troubleshooting
 
-### "Error: Could not read access token"
+### Status bar shows `⚠ token expired`
 
-Your Claude Code credentials file is missing or malformed. Make sure you're logged into Claude Code (`claude` in terminal).
+The cache contains an auth error from a failed `usage.sh` call. If you're using the proxy, this shouldn't happen. Check that:
+- The proxy is running: `curl -s http://127.0.0.1:8087/v1/messages` should return a response (even an error)
+- `ANTHROPIC_BASE_URL` is set in your settings.json
 
-### "Error: Authentication failed"
+### Status bar shows `⚠ rate limit stale`
 
-Your OAuth token has expired. Restart Claude Code to refresh it, or set `ANTHROPIC_API_KEY` manually.
+The cache hasn't been updated in 30+ minutes. Either:
+- The proxy isn't running (start it)
+- Claude Code hasn't made any API calls recently (this is normal during idle)
 
-### "Error: No rate limit headers"
+### Status bar shows `🔋 ...`
 
-The API response didn't include rate limit headers. This can happen if:
-- The API endpoint is unreachable
-- You're behind a proxy that strips headers
-- The API version has changed
+The cache file doesn't exist yet. If using the proxy, make your first Claude Code request – it will be populated automatically. If using polling mode, run `usage.sh` manually.
 
-### Status bar shows `...` or `?` for rate limits
+### Proxy shows `EADDRINUSE`
 
-The cache hasn't been populated yet. Run `usage.sh` manually once:
+Another process is already using port 8087. Either:
+- The proxy is already running (nothing to do)
+- Another service uses that port – change `RATE_PROXY_PORT`
 
-```bash
-~/.local/bin/usage.sh
-```
+### "Error: Authentication failed" (usage.sh)
+
+Your OAuth token has expired. This only affects polling mode. Switch to proxy mode to avoid this issue entirely.
 
 ### Colors don't show up
 
@@ -164,16 +260,19 @@ curl -sL https://raw.githubusercontent.com/raczviktor/claude-code-usage/main/ins
 Or manually:
 
 ```bash
-rm ~/.local/bin/usage.sh ~/.local/bin/statusline.sh
+rm ~/.local/bin/rate-proxy.js ~/.local/bin/usage.sh ~/.local/bin/statusline.sh
 rm ~/.local/bin/.usage_cache ~/.local/bin/.statusline_state
-# Then remove the statusLine block from ~/.claude/settings.json
+# Then remove statusLine and ANTHROPIC_BASE_URL from ~/.claude/settings.json
 ```
+
+Don't forget to stop the proxy process and remove any startup scripts.
 
 ## Notes
 
-- **Claude Max (subscription):** Uses the OAuth token from `~/.claude/.credentials.json` automatically
-- **API key users:** Set `ANTHROPIC_API_KEY` environment variable. The API probe call costs ~1 token per check (negligible)
+- **Proxy mode** works with any authentication method – OAuth (Claude Max), API keys, everything
+- **Polling mode** requires a valid `ANTHROPIC_API_KEY` or OAuth token. The API probe costs ~1 token per check (negligible)
 - **Rate limit headers** are specific to your account tier and are returned with every API response
+- The proxy has zero dependencies – just Node.js standard library
 - Works on **Linux, macOS, and Windows** (Git Bash / WSL)
 
 ## License

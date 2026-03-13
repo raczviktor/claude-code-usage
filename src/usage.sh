@@ -3,6 +3,10 @@
 # Reads OAuth token from ~/.claude/.credentials.json (Claude Max)
 # or uses ANTHROPIC_API_KEY environment variable (API users)
 # Writes cache file for statusline.sh
+#
+# NOTE: If you use rate-proxy.js, this script is only needed as a
+# fallback when the proxy is not running. The proxy updates the cache
+# automatically on every Claude Code API call.
 
 CRED_FILE="$HOME/.claude/.credentials.json"
 CACHE_FILE="$HOME/.local/bin/.usage_cache"
@@ -30,13 +34,21 @@ RESPONSE=$(curl -s -D- -o /dev/null "https://api.anthropic.com/v1/messages" \
   -H "content-type: application/json" \
   -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"."}]}' 2>/dev/null)
 
-# --- Error handling ---
+# --- Error handling (write error status to cache for statusline) ---
 if echo "$RESPONSE" | grep -q "HTTP.*401\|HTTP.*403"; then
+  cat > "$CACHE_FILE" <<CACHE
+TIMESTAMP=$(date +%s)
+STATUS=auth_error
+CACHE
   echo "Error: Authentication failed – token expired or invalid"
   exit 1
 fi
 
 if ! echo "$RESPONSE" | grep -qi "ratelimit"; then
+  cat > "$CACHE_FILE" <<CACHE
+TIMESTAMP=$(date +%s)
+STATUS=no_headers
+CACHE
   echo "Error: No rate limit headers in response"
   echo "$RESPONSE" | head -20
   exit 1
